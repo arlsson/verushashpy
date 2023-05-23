@@ -8,7 +8,7 @@ import sys
 from subprocess import check_call
 from hashlib import sha256
 
-__version__ = '0.0.3'
+__version__ = '0.0.4'
 
 
 class get_pybind_include(object):
@@ -102,6 +102,7 @@ ext_modules = [
                 'src/crypto/verus_clhash_portable.cpp',
                 'src/support/cleanse.cpp',
                 'src/blockhash.cpp',
+                'src/solutiondata.cpp',
                 'src/main.cpp']),
         include_dirs=[
             # Path to pybind11 headers

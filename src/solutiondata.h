@@ -10,6 +10,10 @@
 #include "hash.h"
 #include "streams.h"
 #include "tinyformat.h"
+#include "crypto/arith_uint256.h"
+
+static const int PROTOCOL_VERSION = 170009;
+typedef int64_t CAmount;
 
 inline std::string HexBytes(const unsigned char *buf, int size)
 {
@@ -98,6 +102,9 @@ public:
     static bool NewPOSActive(int32_t height);
     static bool NewNonceActive(int32_t height);
 
+    static arith_uint256 entropyMask;
+    static arith_uint256 posDiffMask;
+
     CPOSNonce() : uint256() { }
     CPOSNonce(const base_blob<256> &b) : uint256(b) { }
     CPOSNonce(const std::vector<unsigned char> &vch) : uint256(vch) { }
@@ -113,6 +120,45 @@ public:
         }
         return nBits;
     }
+
+    bool IsPOSNonce(uint32_t version=VERUS_V1) const
+    {
+        arith_uint256 arNonce = UintToArith256(*this);
+        arith_uint256 tmpNonce = ((arNonce << 128) >> 128);
+        if (version == VERUS_V2)
+        {
+            CVerusHashV2Writer hashWriter = CVerusHashV2Writer(SER_GETHASH, PROTOCOL_VERSION);
+            hashWriter << ArithToUint256(tmpNonce);
+            return (*this == ArithToUint256(UintToArith256(hashWriter.GetHash()) << 128 | tmpNonce));
+        }
+        else
+        {
+            CVerusHashWriter hashWriter = CVerusHashWriter(SER_GETHASH, PROTOCOL_VERSION);
+            hashWriter << ArithToUint256(tmpNonce);
+            return (*this == ArithToUint256(UintToArith256(hashWriter.GetHash()) << 128 | tmpNonce));
+        }
+    }
+
+    void SetPOSTarget(uint32_t nBits, uint32_t version=VERUS_V1)
+    {
+        arith_uint256 arNonce = (UintToArith256(*this) & entropyMask) | nBits;
+
+        if (version == VERUS_V2)
+        {
+            CVerusHashV2Writer hashWriter = CVerusHashV2Writer(SER_GETHASH, PROTOCOL_VERSION);
+            hashWriter << ArithToUint256(arNonce);
+            (uint256 &)(*this) = ArithToUint256(UintToArith256(hashWriter.GetHash()) << 128 | arNonce);
+        }
+        else
+        {
+            CVerusHashWriter hashWriter = CVerusHashWriter(SER_GETHASH, PROTOCOL_VERSION);
+            hashWriter << ArithToUint256(arNonce);
+            (uint256 &)(*this) = ArithToUint256(UintToArith256(hashWriter.GetHash()) << 128 | arNonce);
+        }
+    }
+
+    void SetPOSEntropy(const uint256 &pastHash, uint256 txid, int32_t voutNum, uint32_t version=VERUS_V1);
+    bool CheckPOSEntropy(const uint256 &pastHash, uint256 txid, int32_t voutNum, uint32_t version=VERUS_V1);
 };
 
 class CBlockHeader;
@@ -130,7 +176,7 @@ public:
 
     CPBaaSPreHeader() : nBits(0) {}
     CPBaaSPreHeader(const uint256 &prevBlock, const uint256 &merkleRoot, const uint256 &finalSaplingRoot,const uint256 &nonce, uint32_t compactTarget,
-                    const uint256 &PrevMMRRoot, const uint256 &TransactionMMRRoot) : 
+                    const uint256 &PrevMMRRoot, const uint256 &TransactionMMRRoot) :
                     hashPrevBlock(prevBlock), hashMerkleRoot(merkleRoot), hashFinalSaplingRoot(finalSaplingRoot), nNonce(nonce), nBits(compactTarget),
                     hashPrevMMRRoot(PrevMMRRoot), hashBlockMMRRoot(TransactionMMRRoot) {}
 
@@ -147,6 +193,13 @@ public:
         READWRITE(nBits);
         READWRITE(hashPrevMMRRoot);
         READWRITE(hashBlockMMRRoot);
+    }
+
+    void SetBlockData(CBlockHeader &bh);
+
+    bool IsValid() const
+    {
+        return !(hashPrevBlock.IsNull() && hashMerkleRoot.IsNull() && hashFinalSaplingRoot.IsNull() && nNonce.IsNull() && !nBits && hashBlockMMRRoot.IsNull());
     }
 };
 
@@ -169,27 +222,28 @@ public:
 
     CPBaaSBlockHeader(const uint160 &cID, const uint256 &hashPre) : chainID(cID), hashPreHeader(hashPre) { }
 
-    CPBaaSBlockHeader(const char *pbegin, const char *pend) 
+    CPBaaSBlockHeader(const char *pbegin, const char *pend)
     {
-        CDataStream s = CDataStream(pbegin, pend, SER_NETWORK, 0);
+        CDataStream s = CDataStream(pbegin, pend, SER_NETWORK, PROTOCOL_VERSION);
         s >> *this;
     }
 
     CPBaaSBlockHeader(const uint160 &cID, const CPBaaSPreHeader &pbph);
 
-    CPBaaSBlockHeader(const uint160 &cID, 
-                        const uint256 &hashPrevBlock, 
-                        const uint256 &hashMerkleRoot, 
-                        const uint256 &hashFinalSaplingRoot, 
-                        const uint256 &nNonce, 
-                        uint32_t nBits, 
+    CPBaaSBlockHeader(const uint160 &cID,
+                        const uint256 &hashPrevBlock,
+                        const uint256 &hashMerkleRoot,
+                        const uint256 &hashFinalSaplingRoot,
+                        const uint256 &nNonce,
+                        uint32_t nBits,
                         const uint256 &hashPrevMMRRoot,
                         const uint256 &hashBlockMMRRoot)
     {
         CPBaaSPreHeader pbph(hashPrevBlock, hashMerkleRoot, hashFinalSaplingRoot, nNonce, nBits, hashPrevMMRRoot, hashBlockMMRRoot);
 
-        CHashWriter hw(SER_GETHASH, 0);
+        CHashWriter hw(SER_GETHASH, PROTOCOL_VERSION);
         hw << pbph;
+
         hashPreHeader = hw.GetHash();
     }
 
@@ -240,12 +294,12 @@ class CPBaaSSolutionDescriptor
         // this is additional data for the block specific header. this is also cleared out
         // when making a canonical header, and the values here are hashed into the pre-header hash
         uint256 hashPrevMMRRoot;                                       // prior block's Merkle Mountain Range
-        uint256 hashBlockMMRRoot;                                // this is the root MMR for transactions in this block
+        uint256 hashBlockMMRRoot;                                      // this is the root MMR for transactions in this block
         // end block specific data
 
         CPBaaSSolutionDescriptor() : version(0), descrBits(0), numPBaaSHeaders(0), extraDataSize(0) {}
 
-        CPBaaSSolutionDescriptor(uint32_t ver, uint8_t descr, uint8_t numSubHeaders, uint16_t sSize, uint256 PrevMMRRoot, uint256 TransactionMMRRoot) : 
+        CPBaaSSolutionDescriptor(uint32_t ver, uint8_t descr, uint8_t numSubHeaders, uint16_t sSize, uint256 PrevMMRRoot, uint256 TransactionMMRRoot) :
             version(ver), descrBits(descr), numPBaaSHeaders(numSubHeaders), extraDataSize(sSize), hashPrevMMRRoot(PrevMMRRoot), hashBlockMMRRoot(TransactionMMRRoot)
         {}
 
@@ -373,7 +427,7 @@ class CConstVerusSolutionVector
         }
 
         // returns 0 if not PBaaS, 1 if PBaaS PoW, -1 if PBaaS PoS
-        static int32_t IsPBaaS(const std::vector<unsigned char> &vch)
+        static int32_t IsAdvancedSolution(const std::vector<unsigned char> &vch)
         {
             if (Version(vch) >= CActivationHeight::ACTIVATE_PBAAS)
             {
@@ -403,11 +457,11 @@ class CConstVerusSolutionVector
             return GetDescriptor(vch).numPBaaSHeaders * sizeof(CPBaaSBlockHeader) + OVERHEAD_SIZE;
         }
 
-        static uint32_t ExtraDataLen(const std::vector<unsigned char> &vch)
+        static uint32_t ExtraDataLen(const std::vector<unsigned char> &vch, bool allowPBaaSHeader=false)
         {
             int len;
 
-            if (Version(vch) < CActivationHeight::ACTIVATE_PBAAS)
+            if (!(Version(vch) >= CActivationHeight::ACTIVATE_PBAAS || (allowPBaaSHeader && Version(vch) >= CActivationHeight::ACTIVATE_PBAAS_HEADER)))
             {
                 len = 0;
             }
@@ -472,7 +526,7 @@ class CVerusSolutionVector
         void SetDescriptor(CPBaaSSolutionDescriptor d)
         {
             solutionTools.SetDescriptor(vch, d);
-        }    
+        }
 
         uint32_t DescriptorBits()
         {
@@ -485,9 +539,9 @@ class CVerusSolutionVector
         }
 
         // returns 0 if not PBaaS, 1 if PBaaS PoW, -1 if PBaaS PoS
-        int32_t IsPBaaS()
+        int32_t IsAdvancedSolution()
         {
-            return solutionTools.IsPBaaS(vch);
+            return solutionTools.IsAdvancedSolution(vch);
         }
 
         // returns 0 if not PBaaS, 1 if PBaaS PoW, -1 if PBaaS PoS
@@ -651,14 +705,12 @@ public:
         return (nBits == 0);
     }
 
-    uint256 GetVerusV2Hash() const;
-
     // returns 0 if not PBaaS, 1 if PBaaS PoW, -1 if PBaaS PoS
-    int32_t IsPBaaS() const
+    int32_t IsAdvancedHeader() const
     {
         if (nVersion == VERUS_V2)
         {
-            return CConstVerusSolutionVector::IsPBaaS(nSolution);
+            return CConstVerusSolutionVector::IsAdvancedSolution(nSolution);
         }
         return 0;
     }
@@ -673,9 +725,10 @@ public:
     }
 
     // return a vector of bytes that contains the internal data for this solution vector
-    void GetExtraData(std::vector<unsigned char> &dataVec)
+    void GetExtraData(std::vector<unsigned char> &dataVec) const
     {
-        CVerusSolutionVector(nSolution).GetExtraData(dataVec);
+        std::vector<unsigned char> writeSolution = nSolution;
+        CVerusSolutionVector(writeSolution).GetExtraData(dataVec);
     }
 
     // set the extra data with a pointer to bytes and length
@@ -722,11 +775,11 @@ public:
     bool SavePBaaSHeader(CPBaaSBlockHeader &pbh, uint32_t idx)
     {
         CPBaaSBlockHeader pbbh = CPBaaSBlockHeader();
-        int32_t ix;
+        int ix;
 
         CVerusSolutionVector sv = CVerusSolutionVector(nSolution);
 
-        if (sv.HasPBaaSHeader() && !pbh.IsNull() && idx < sv.GetNumPBaaSHeaders() && ((((ix = GetPBaaSHeader(pbbh, pbh.chainID)) == -1) || (uint32_t)ix == idx)))
+        if (sv.HasPBaaSHeader() && !pbh.IsNull() && idx < sv.GetNumPBaaSHeaders() && (((ix = GetPBaaSHeader(pbbh, pbh.chainID)) == -1) || ix == idx))
         {
             sv.SetPBaaSHeader(pbh, idx);
             return true;
@@ -737,12 +790,12 @@ public:
     bool UpdatePBaaSHeader(const CPBaaSBlockHeader &pbh)
     {
         CPBaaSBlockHeader pbbh = CPBaaSBlockHeader();
-        int32_t ix;
+        uint32_t idx;
 
         // what we are updating, must be present
-        if (!pbh.IsNull() && (ix = GetPBaaSHeader(pbbh, pbh.chainID)) != -1)
+        if (!pbh.IsNull() && (idx = GetPBaaSHeader(pbbh, pbh.chainID)) != -1)
         {
-            CVerusSolutionVector(nSolution).SetPBaaSHeader(pbh, ix);
+            CVerusSolutionVector(nSolution).SetPBaaSHeader(pbh, idx);
             return true;
         }
         return false;
@@ -756,16 +809,29 @@ public:
         {
             CPBaaSBlockHeader pbh;
             // if we weren't last, move the one that was last to our prior space
-            if (idx < (uint32_t)(descr.numPBaaSHeaders - 1))
+            if (idx < (descr.numPBaaSHeaders - 1))
             {
                 sv.GetPBaaSHeader(pbh, descr.numPBaaSHeaders - 1);
             }
             sv.SetPBaaSHeader(pbh, idx);
-            
+
             descr.numPBaaSHeaders--;
             sv.SetDescriptor(descr);
         }
     }
+
+    // returns the index of the new header if added, otherwise, -1
+    int32_t AddPBaaSHeader(const CPBaaSBlockHeader &pbh);
+
+    // add the parts of this block header that can be represented by a PBaaS header to the solution
+    int32_t AddPBaaSHeader(const uint160 &cID)
+    {
+        CPBaaSBlockHeader pbbh = CPBaaSBlockHeader(cID, CPBaaSPreHeader(*this));
+        return AddPBaaSHeader(pbbh);
+    }
+
+    bool AddUpdatePBaaSHeader();
+    bool AddUpdatePBaaSHeader(const CPBaaSBlockHeader &pbh);
 
     // clears everything except version, time, and solution, which are shared across all merge mined blocks
     void ClearNonCanonicalData()
@@ -786,7 +852,36 @@ public:
     // this confirms that the current header's data matches what would be expected from its preheader hash in the
     // solution
     bool CheckNonCanonicalData() const;
-    bool CheckNonCanonicalData(uint160 &cID) const;
+    bool CheckNonCanonicalData(const uint160 &cID) const;
+
+    uint256 GetHash() const
+    {
+        return (this->*hashFunction)();
+    }
+
+
+
+    // getters/setters for extra data in extended solution
+    uint256 GetPrevMMRRoot() const;
+    void SetPrevMMRRoot(const uint256 &prevMMRRoot);
+
+    // returns the hashMerkleRoot for blocks before PBaaS
+    uint256 GetBlockMMRRoot() const;
+    void SetBlockMMRRoot(const uint256 &blockMMRRoot);
+
+    uint256 GetSHA256DHash() const;
+    static void SetSHA256DHash();
+
+    uint256 GetVerusHash() const;
+    static void SetVerusHash();
+
+    uint256 GetVerusV2Hash() const;
+    static void SetVerusV2Hash();
+
+    static uint256 GetRawVerusPOSHash(int32_t blockVersion, uint32_t solVersion, uint32_t magic, const uint256 &nonce, int32_t height, bool isVerusMainnet=true);
+    bool GetRawVerusPOSHash(uint256 &ret, int32_t nHeight) const;
+    bool GetVerusPOSHash(arith_uint256 &ret, int32_t nHeight, CAmount value) const; // value is amount of stake tx
+    uint256 GetVerusEntropyHashComponent(int32_t nHeight) const;
 
     int64_t GetBlockTime() const
     {
@@ -803,6 +898,70 @@ public:
             nBits += *p;
         }
         return nBits;
+    }
+
+    bool IsVerusPOSBlock() const
+    {
+        return nNonce.IsPOSNonce(nVersion) && GetVerusPOSTarget() != 0;
+    }
+
+    void SetVerusPOSTarget(uint32_t nBits)
+    {
+        if (nVersion == VERUS_V2)
+        {
+            CVerusHashV2Writer hashWriter = CVerusHashV2Writer(SER_GETHASH, PROTOCOL_VERSION);
+
+            arith_uint256 arNonce = UintToArith256(nNonce);
+
+            // printf("before svpt: %s\n", ArithToUint256(arNonce).GetHex().c_str());
+
+            arNonce = (arNonce & CPOSNonce::entropyMask) | nBits;
+
+            // printf("after clear: %s\n", ArithToUint256(arNonce).GetHex().c_str());
+
+            hashWriter << ArithToUint256(arNonce);
+            nNonce = CPOSNonce(ArithToUint256(UintToArith256(hashWriter.GetHash()) << 128 | arNonce));
+
+            // printf(" after svpt: %s\n", nNonce.GetHex().c_str());
+        }
+        else
+        {
+            CVerusHashWriter hashWriter = CVerusHashWriter(SER_GETHASH, PROTOCOL_VERSION);
+
+            arith_uint256 arNonce = UintToArith256(nNonce);
+
+            // printf("before svpt: %s\n", ArithToUint256(arNonce).GetHex().c_str());
+
+            arNonce = (arNonce & CPOSNonce::entropyMask) | nBits;
+
+            // printf("after clear: %s\n", ArithToUint256(arNonce).GetHex().c_str());
+
+            hashWriter << ArithToUint256(arNonce);
+            nNonce = CPOSNonce(ArithToUint256(UintToArith256(hashWriter.GetHash()) << 128 | arNonce));
+
+            // printf(" after svpt: %s\n", nNonce.GetHex().c_str());
+        }
+    }
+
+    void SetVersionByHeight(uint32_t height)
+    {
+        CVerusSolutionVector vsv = CVerusSolutionVector(nSolution);
+        if (vsv.SetVersionByHeight(height) && vsv.Version() > 0)
+        {
+            nVersion = VERUS_V2;
+        }
+    }
+
+    static uint32_t GetVersionByHeight(uint32_t height)
+    {
+        if (CVerusSolutionVector::GetVersionByHeight(height) > 0)
+        {
+            return VERUS_V2;
+        }
+        else
+        {
+            return CURRENT_VERSION;
+        }
     }
 };
 
