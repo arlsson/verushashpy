@@ -26,6 +26,10 @@ requirements:
 test:
   imports:
     - verushash
+  source_files:
+    - tests
+  commands:
+    - python tests/verus_hash.py
 
 about:
   summary: VerusHash Native Module for Python 3.5+
