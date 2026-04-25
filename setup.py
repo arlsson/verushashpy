@@ -35,7 +35,7 @@ def verify_sha256sum(file_path, expected_sha256):
 
 
 def build_libsodium():
-    libsodium_version = '1.0.18'
+    libsodium_version = '1.0.22'
     install_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src")
     if platform.system() == "Windows":
         import zipfile
@@ -45,12 +45,12 @@ def build_libsodium():
         expected_sha256 = 'c1d48d85c9361e350931ffe5067559cd7405a697c655d26955fb568d1084a5f4'
         # Download libsodium
         response = requests.get(libsodium_url, stream=True)
+        with open(file_path, 'wb') as f:
+            f.write(response.content)
         # Verify the sha256sum
         if not verify_sha256sum(file_path, expected_sha256):
             print("ERROR: The download's sha256sum does not match the expected one.")
             return
-        with open(file_path, 'wb') as f:
-            f.write(response.content)
         # Extract the zip file
         with zipfile.ZipFile(file_path, 'r') as zip_ref:
             zip_ref.extractall()
@@ -60,7 +60,7 @@ def build_libsodium():
     else:
         import tarfile
         libsodium_url = f'https://download.libsodium.org/libsodium/releases/libsodium-{libsodium_version}.tar.gz'
-        expected_sha256 = '6f504490b342a4f8a4c4a02fc9b866cbef8622d5df4e5452b46be121e46636c1'
+        expected_sha256 = 'adbdd8f16149e81ac6078a03aca6fc03b592b89ef7b5ed83841c086191be3349'
         file_path = f'libsodium-{libsodium_version}.tar.gz'
         # Download libsodium
         response = requests.get(libsodium_url, stream=True)
@@ -112,6 +112,7 @@ ext_modules = [
         ],
         libraries=['sodium'],
         library_dirs=[build_libsodium()],
+        runtime_library_dirs=[build_libsodium()],
         define_macros=[('VERSION_INFO', __version__)],
     ),
 ]
@@ -200,7 +201,7 @@ setup(
     description='Native Verus Hash module for Python',
     long_description='A Verus Hash module supporting VerusHash 1.0 - 2.2, written in C++',
     ext_modules=ext_modules,
-    setup_requires=['pybind11>=2.5'],
+    setup_requires=['pybind11>=2.5', 'requests'],
     cmdclass={'build_ext': BuildExt},
     zip_safe=False,
 )
